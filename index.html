@@ -13,9 +13,14 @@
   #wrap { max-width: 1200px; margin: 0 auto; padding: 16px; }
   h1 { font-size: 2.25rem; margin: 0 0 4px; }
   p.sub { margin: 0 0 12px; color: #666; font-size: 0.9rem; font-family: 'Roboto Flex'; font-weight: 4300}
+  .source { font-size: 11px; fill: #444; font-family: "Roboto Flex"; text-anchor: end; pointer-events: none; }
   svg { width: 100%; height: auto; display: block; background: #9dd9ff; border: 0px solid #e3e3e3; border-radius: 8px; -webkit-tap-highlight-color: transparent; }
   .state { fill: #ffffff; stroke: #9dd9ff; stroke-width: 0.75; }
   .state.canada { fill: #f6f6f6; }
+
+  /* Leader lines + anchor dots mark a stadium's true location when its emoji was nudged */
+  .leader { stroke: #555; stroke-width: 0.9; opacity: 0.7; pointer-events: none; }
+  .anchor { fill: #555; stroke: #fff; stroke-width: 0.75; pointer-events: none; }
 
   /* Each stadium is a group: an invisible circle catches hover/taps, the emoji sits on top */
   .stadium { cursor: pointer; }
@@ -67,12 +72,15 @@ const EMOJI = "🌭";
 
 // ---- Layout configs --------------------------------------------------
 // width/height are viewBox units. `size` is the emoji font-size range (min price -> max price).
+// `spread` tunes the de-overlap: padding = extra gap between emojis,
+// pull = how strongly each emoji is tugged back toward its true location (0-1, lower = more spread).
 const MOBILE_QUERY = window.matchMedia("(max-width: 640px)");
 const layouts = {
   desktop: {
     width: 975, height: 610, margin: 10,
     size: [16, 52],
     hitPad: 4,                 // extra invisible hover/tap padding around each emoji
+    spread: { padding: 5, pull: 0.35, anchorR: 2.5 },
     legend: { x: 20, y: 590, fontSize: 11, titleGap: 13, gap: 6 },
     hint: "Emoji size reflects hot dog price. Hover a stadium for details."
   },
@@ -80,6 +88,7 @@ const layouts = {
     width: 600, height: 430, margin: 6,
     size: [14, 34],
     hitPad: 8,
+    spread: { padding: 1, pull: 0.35, anchorR: 2 },
     legend: { x: 12, y: 420, fontSize: 12, titleGap: 12, gap: 4 },
     hint: "Emoji size reflects hot dog price. Tap a stadium for details."
   }
@@ -141,15 +150,58 @@ function draw(states, mlb) {
   // Emoji font-size scale (sqrt so visual area tracks price, starting at the min price)
   const size = d3.scaleSqrt().domain([minP, maxP]).range(cfg.size);
 
+  // ---- De-overlap ----------------------------------------------------
+  // Each emoji is pulled toward its true location (x0, y0) while a collision force
+  // pushes neighbors apart. Run synchronously so there's no animation / jitter on redraw.
+  const S = cfg.spread;
+  const rad = d => size(d.price) * 0.55 + S.padding;
+
+  stadiums.forEach(d => { d.x0 = d.xy[0]; d.y0 = d.xy[1]; d.x = d.x0; d.y = d.y0; });
+
+  // Only emojis that actually overlap a neighbor get to move; the rest are pinned in place.
+  // Pinned emojis still push crowded neighbors away, so nothing lands on top of them.
+  stadiums.forEach(d => {
+    d.crowded = stadiums.some(o => o !== d &&
+      Math.hypot(o.x0 - d.x0, o.y0 - d.y0) < rad(o) + rad(d));
+    if (!d.crowded) { d.fx = d.x0; d.fy = d.y0; }
+  });
+
+  const sim = d3.forceSimulation(stadiums)
+    .force("x", d3.forceX(d => d.x0).strength(S.pull))
+    .force("y", d3.forceY(d => d.y0).strength(S.pull))
+    .force("collide", d3.forceCollide(rad).iterations(3))
+    .stop();
+  for (let i = 0; i < 300; i++) sim.tick();
+
+  // Only crowded stadiums that moved a meaningful distance get a leader line + anchor dot.
+  // The threshold scales with emoji size so a big emoji that still covers its true spot gets no line.
+  const moved = stadiums.filter(d => d.crowded &&
+    Math.hypot(d.x - d.x0, d.y - d.y0) > size(d.price) * 0.4);
+
   // Draw big emojis first so small ones stay hoverable on top
   stadiums.sort((a, b) => b.price - a.price);
+
+  // Leader lines go under the emojis
+  const leaders = svg.append("g");
+  leaders.selectAll("line")
+    .data(moved)
+    .join("line")
+    .attr("class", "leader")
+    .attr("x1", d => d.x0).attr("y1", d => d.y0)
+    .attr("x2", d => d.x).attr("y2", d => d.y);
+  leaders.selectAll("circle")
+    .data(moved)
+    .join("circle")
+    .attr("class", "anchor")
+    .attr("cx", d => d.x0).attr("cy", d => d.y0)
+    .attr("r", S.anchorR);
 
   const stops = svg.append("g")
     .selectAll("g")
     .data(stadiums)
     .join("g")
     .attr("class", "stadium")
-    .attr("transform", d => `translate(${d.xy[0]}, ${d.xy[1]})`)
+    .attr("transform", d => `translate(${d.x}, ${d.y})`)
     // Mouse: hover. Touch is handled by click, because touch pointers
     // "leave" the instant the finger lifts.
     .on("pointerenter pointermove", (event, d) => { if (event.pointerType !== "touch") showTip(event, d); })
@@ -198,6 +250,14 @@ function draw(states, mlb) {
     .style("font-size", L.fontSize + "px")
     .style("font-weight", 600)
     .text("Hot dog price (USD)");
+
+  // Source credit, bottom right of the map
+  svg.append("text")
+    .attr("class", "source")
+    .attr("x", width - 12)
+    .attr("y", height - 10)
+    .style("font-size", L.fontSize + "px")
+    .text("#30DayMapChallenge Day 23: Taste | Map: Michael Pincus | Source: Statista");
 }
 
 // ---- Load once, redraw when crossing the breakpoint -------------------
